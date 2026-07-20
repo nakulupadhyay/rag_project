@@ -1,0 +1,36 @@
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+class Settings:
+    # --- CORS ---
+    # Comma separated list of allowed origins, e.g. "https://myapp.vercel.app,http://localhost:3000"
+    FRONTEND_ORIGINS: list[str] = [
+        o.strip() for o in os.getenv("FRONTEND_ORIGINS", "*").split(",") if o.strip()
+    ]
+
+    # --- Embeddings (always local + free) ---
+    EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+
+    # --- Generation ---
+    # "local"  -> runs a small open-source seq2seq model on the server (no API key needed)
+    # "api"    -> calls the free Hugging Face Inference API (needs HF_API_TOKEN)
+    GENERATION_MODE: str = os.getenv("GENERATION_MODE", "local")
+    LOCAL_GENERATION_MODEL: str = os.getenv("LOCAL_GENERATION_MODEL", "google/flan-t5-small")
+    HF_API_MODEL: str = os.getenv("HF_API_MODEL", "HuggingFaceH4/zephyr-7b-beta")
+    HF_API_TOKEN: str = os.getenv("HF_API_TOKEN", "")
+
+    # --- Chunking ---
+    CHUNK_SIZE_WORDS: int = int(os.getenv("CHUNK_SIZE_WORDS", "180"))
+    CHUNK_OVERLAP_WORDS: int = int(os.getenv("CHUNK_OVERLAP_WORDS", "40"))
+
+    # --- Retrieval ---
+    TOP_K: int = int(os.getenv("TOP_K", "4"))
+
+    # --- Paths ---
+    SAMPLE_DOCS_DIR: str = os.getenv("SAMPLE_DOCS_DIR", "sample_docs")
+
+
+settings = Settings()
