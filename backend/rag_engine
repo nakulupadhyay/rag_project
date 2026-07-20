@@ -1,0 +1,150 @@
+from __future__ import annotations
+
+import glob
+import os
+import threading
+from dataclasses import dataclass, field
+from typing import List, Literal
+
+import faiss
+import numpy as np
+from sentence_transformers import SentenceTransformer
+
+from config import settings
+from document_loader import chunk_text, extract_text
+
+Source = Literal["fixed", "uploaded"]
+
+
+@dataclass
+class Chunk:
+    text: str
+    doc_name: str
+
+
+@dataclass
+class VectorStore:
+    index: faiss.Index | None = None
+    chunks: List[Chunk] = field(default_factory=list)
+
+    def add(self, embeddings: np.ndarray, chunks: List[Chunk]) -> None:
+        if self.index is None:
+            self.index = faiss.IndexFlatIP(embeddings.shape[1])
+        self.index.add(embeddings)
+        self.chunks.extend(chunks)
+
+    def search(self, query_vec: np.ndarray, k: int):
+        if self.index is None or self.index.ntotal == 0:
+            return []
+        k = min(k, self.index.ntotal)
+        scores, idxs = self.index.search(query_vec, k)
+        results = []
+        for score, idx in zip(scores[0], idxs[0]):
+            if idx == -1:
+                continue
+            results.append((self.chunks[idx], float(score)))
+        return results
+
+
+class RAGEngine:
+    def __init__(self) -> None:
+        self._embedder = SentenceTransformer(settings.EMBEDDING_MODEL)
+        self._lock = threading.Lock()
+        self.stores: dict[Source, VectorStore] = {"fixed": VectorStore(), "uploaded": VectorStore()}
+        self._generator = None  # lazy-loaded, see _local_generate
+
+    # ---------------------------------------------------------------- #
+    # Indexing
+    # ---------------------------------------------------------------- #
+    def embed(self, texts: List[str]) -> np.ndarray:
+        vecs = self._embedder.encode(texts, normalize_embeddings=True, show_progress_bar=False)
+        return np.asarray(vecs, dtype="float32")
+
+    def build_fixed_index(self) -> None:
+        """Load every file in sample_docs/ into the 'fixed' store."""
+        paths = sorted(glob.glob(os.path.join(settings.SAMPLE_DOCS_DIR, "*")))
+        all_chunks: List[Chunk] = []
+        for path in paths:
+            with open(path, "rb") as f:
+                raw = f.read()
+            text = extract_text(os.path.basename(path), raw)
+            for piece in chunk_text(text):
+                all_chunks.append(Chunk(text=piece, doc_name=os.path.basename(path)))
+
+        if not all_chunks:
+            return
+        vecs = self.embed([c.text for c in all_chunks])
+        with self._lock:
+            self.stores["fixed"].add(vecs, all_chunks)
+
+    def add_uploaded_document(self, filename: str, raw_bytes: bytes) -> int:
+        """Extract, chunk, embed and index an uploaded file. Returns #chunks added."""
+        text = extract_text(filename, raw_bytes)
+        pieces = chunk_text(text)
+        if not pieces:
+            return 0
+        chunks = [Chunk(text=p, doc_name=filename) for p in pieces]
+        vecs = self.embed([c.text for c in chunks])
+        with self._lock:
+            self.stores["uploaded"].add(vecs, chunks)
+        return len(chunks)
+
+    def list_documents(self, source: Source) -> List[str]:
+        names = {c.doc_name for c in self.stores[source].chunks}
+        return sorted(names)
+
+    # ---------------------------------------------------------------- #
+    # Retrieval + generation
+    # ---------------------------------------------------------------- #
+    def retrieve(self, query: str, source: Source, k: int = settings.TOP_K):
+        query_vec = self.embed([query])
+        return self.stores[source].search(query_vec, k)
+
+    def answer(self, query: str, source: Source, k: int = settings.TOP_K) -> dict:
+        results = self.retrieve(query, source, k)
+        if not results:
+            return {
+                "answer": "I don't have any indexed documents to answer from yet. "
+                "Upload a file, or switch to the fixed archive.",
+                "sources": [],
+            }
+
+        context = "\n\n".join(f"[{i+1}] {c.text}" for i, (c, _) in enumerate(results))
+        answer_text = self._generate(query, context)
+        sources = [
+            {"rank": i + 1, "doc_name": c.doc_name, "excerpt": c.text[:280], "score": round(score, 3)}
+            for i, (c, score) in enumerate(results)
+        ]
+        return {"answer": answer_text, "sources": sources}
+
+    def _generate(self, question: str, context: str) -> str:
+        prompt = (
+            "Answer the question using only the context below. "
+            "If the answer is not contained in the context, say you don't know.\n\n"
+            f"Context:\n{context}\n\nQuestion: {question}\nAnswer:"
+        )
+        if settings.GENERATION_MODE == "api" and settings.HF_API_TOKEN:
+            return self._api_generate(prompt)
+        return self._local_generate(prompt)
+
+    def _local_generate(self, prompt: str) -> str:
+        if self._generator is None:
+            from transformers import pipeline
+
+            self._generator = pipeline(
+                "text2text-generation",
+                model=settings.LOCAL_GENERATION_MODEL,
+            )
+        out = self._generator(prompt, max_new_tokens=200, do_sample=False)
+        return out[0]["generated_text"].strip()
+
+    def _api_generate(self, prompt: str) -> str:
+        from huggingface_hub import InferenceClient
+
+        client = InferenceClient(model=settings.HF_API_MODEL, token=settings.HF_API_TOKEN)
+        response = client.text_generation(prompt, max_new_tokens=300, temperature=0.3)
+        return response.strip()
+
+
+# Single shared instance used by the FastAPI app
+engine = RAGEngine()
