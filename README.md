@@ -152,6 +152,3 @@ Archive" source.
 - Add re-ranking (e.g. a cross-encoder) after the initial FAISS retrieval
 - Persist uploaded indices to disk or object storage so they survive a redeploy
 
-## License
-
-MIT — see [LICENSE](LICENSE).
