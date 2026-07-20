@@ -1,0 +1,49 @@
+"""
+Turns raw files (PDF or plain text) into overlapping word chunks that are
+small enough to embed and retrieve accurately.
+"""
+from __future__ import annotations
+
+import io
+from typing import List
+
+from pypdf import PdfReader
+
+from config import settings
+
+
+def extract_text(filename: str, raw_bytes: bytes) -> str:
+    """Extract plain text from an uploaded file's raw bytes."""
+    lower = filename.lower()
+    if lower.endswith(".pdf"):
+        reader = PdfReader(io.BytesIO(raw_bytes))
+        pages = [page.extract_text() or "" for page in reader.pages]
+        return "\n".join(pages)
+    # Fall back to treating it as UTF-8 text (.txt, .md, etc.)
+    return raw_bytes.decode("utf-8", errors="ignore")
+
+
+def chunk_text(
+    text: str,
+    chunk_size_words: int = settings.CHUNK_SIZE_WORDS,
+    overlap_words: int = settings.CHUNK_OVERLAP_WORDS,
+) -> List[str]:
+    """Split text into overlapping word-based chunks.
+
+    Overlap keeps context from being cut off mid-idea at chunk boundaries,
+    which meaningfully improves retrieval quality for a small extra cost.
+    """
+    words = text.split()
+    if not words:
+        return []
+
+    chunks: List[str] = []
+    step = max(chunk_size_words - overlap_words, 1)
+    for start in range(0, len(words), step):
+        chunk_words = words[start : start + chunk_size_words]
+        if not chunk_words:
+            continue
+        chunks.append(" ".join(chunk_words))
+        if start + chunk_size_words >= len(words):
+            break
+    return chunks
